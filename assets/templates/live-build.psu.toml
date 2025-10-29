@@ -1,0 +1,5 @@
+# Example manifest that relies on the current time ("now") for timestamps.
+[config]
+name = "DEV SNAPSHOT"
+timestamp_policy = "now"
+exclude = ["psu.toml", "notes.txt"]

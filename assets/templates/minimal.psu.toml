@@ -1,0 +1,8 @@
+# Minimal template that includes files explicitly and uses the fixed timestamp policy.
+[config]
+name = "MY SAVE"
+# RFC3339 or "YYYY-MM-DD HH:MM:SS". When omitted the packer uses the fixed baseline.
+timestamp = "2001-02-03T04:05:06Z"
+# File names are case-insensitive and must live next to this manifest.
+include = ["icon.sys", "BOOT.ELF"]
+# timestamp_policy = "fixed" # optional: fixed (default) | source | now

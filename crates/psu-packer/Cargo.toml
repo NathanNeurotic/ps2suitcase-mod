@@ -9,9 +9,24 @@ version.workspace = true
 ps2-filetypes = { path = "../ps2-filetypes" }
 toml = "0.9.5"
 serde = { version = "1.0.219", features = ["derive"] }
+serde_with = "3.11.0"
 argh = { version = "0.1.13" }
-chrono = "0.4.42"
+chrono = { version = "0.4.42", default-features = false, features = ["std"] }
 colored = "3.0.0"
+thiserror = "1.0.69"
+walkdir = "2.5.0"
+camino = "1.1.7"
+sha2 = { version = "0.10.8", optional = true }
+
+[features]
+default = []
+golden-hash = ["sha2"]
+
+[dev-dependencies]
+once_cell = "1.20.2"
+sha2 = { version = "0.10.8" }
+hex = "0.4.3"
+tempfile = "3.13.0"
 
 [profile.release]
 opt-level = "z"

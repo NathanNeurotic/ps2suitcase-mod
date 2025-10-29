@@ -1,0 +1,96 @@
+name: On-demand Builds
+
+on:
+  workflow_dispatch:
+    inputs:
+      crates:
+        description: "Space-separated list of crates to build"
+        required: true
+        default: "psu-packer suitcase"
+      profile:
+        description: "Cargo profile (dev or release)"
+        required: true
+        default: "release"
+      features:
+        description: "Optional feature list passed to cargo"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build selected crates
+        env:
+          PROFILE: ${{ github.event.inputs.profile }}
+          FEATURES: ${{ github.event.inputs.features }}
+          CRATES: ${{ github.event.inputs.crates }}
+        run: |
+          set -euxo pipefail
+          case "$PROFILE" in
+            release) PROFILE_FLAG="--release" ; TARGET_DIR="release" ;;
+            dev|debug) PROFILE_FLAG="" ; TARGET_DIR="debug" ;;
+            *) echo "Unsupported profile: $PROFILE" >&2 ; exit 1 ;;
+          esac
+
+          if [[ -n "$FEATURES" ]]; then
+            FEATURES_FLAG="--features $FEATURES"
+          else
+            FEATURES_FLAG=""
+          fi
+
+          for CRATE in $CRATES; do
+            cargo build $PROFILE_FLAG $FEATURES_FLAG -p "$CRATE"
+          done
+
+          mkdir -p dist
+          OS_TAG="${{ matrix.os }}"
+          case "$OS_TAG" in
+            ubuntu-latest) OS_TAG="linux" ;;
+            macos-latest) OS_TAG="macos" ;;
+            windows-latest) OS_TAG="windows" ;;
+          esac
+
+          for CRATE in $CRATES; do
+            BIN_PATH="target/$TARGET_DIR/$CRATE"
+            if [[ "${{ matrix.os }}" == windows-latest ]]; then
+              BIN_PATH+=".exe"
+            fi
+            if [[ -f "$BIN_PATH" ]]; then
+              STAGE="package/$CRATE"
+              mkdir -p "$STAGE"
+              cp "$BIN_PATH" "$STAGE/"
+              cp Readme.md "$STAGE/README.md"
+              cp LICENSE.txt "$STAGE/"
+              ARCHIVE="dist/${CRATE}-${OS_TAG}-${PROFILE}"
+              if [[ "${{ matrix.os }}" == windows-latest ]]; then
+                (cd package && zip -r "../${ARCHIVE}.zip" "$CRATE")
+              else
+                (cd package && tar -czf "../${ARCHIVE}.tar.gz" "$CRATE")
+              fi
+              rm -rf "$STAGE"
+            fi
+          done
+          rm -rf package
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.os }}-${{ github.event.inputs.profile }}
+          path: dist
