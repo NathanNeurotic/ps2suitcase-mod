@@ -1,260 +1,92 @@
-use chrono::{DateTime, Local, NaiveDateTime};
-use colored::Colorize;
-use ps2_filetypes::{PSUEntry, PSUEntryKind, PSUWriter, DIR_ID, FILE_ID, PSU};
-use serde::Deserialize;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+
 use argh::FromArgs;
+use colored::Colorize;
+use psu_packer::{load_manifest, pack_project, PackOptions, PsuPackError, TimestampPolicy};
 
 #[derive(Debug, FromArgs)]
-#[argh(description = "Expects a folder with a psu.toml file that follows this format\n\t[config]\n\tname = \"Test PSU\"\t\t\t# Folder name on Memory Card\n\tinclude = [ \"BOOT.ELF\", \"icon.sys\" ]\t# using `exclude` will automatically include all files except the specified ones\n\ttimestamp = \"2024-10-10 10:30:00\"\t# Optional, but recommended\n")]
+/// Package a folder described by psu.toml into a deterministic PSU archive.
 struct Args {
-    /// folder to package to psu
+    /// folder containing psu.toml
     #[argh(positional)]
     folder: String,
-    /// output path
+
+    /// output path for the generated PSU (defaults to <config.name>.psu)
     #[argh(option, short = 'o')]
     output: Option<String>,
+
+    /// override timestamp policy (fixed, source, now)
+    #[argh(option, from_str_fn(parse_policy))]
+    timestamp_policy: Option<TimestampPolicy>,
+
+    /// verify the produced PSU structure after writing
+    #[argh(switch)]
+    verify: bool,
 }
 
-#[derive(Debug, Deserialize)]
-struct Config {
-    name: String,
-    #[serde(default, with = "date_format")]
-    timestamp: Option<NaiveDateTime>,
-    include: Option<Vec<String>>,
-    exclude: Option<Vec<String>>,
-}
-
-mod date_format {
-    use chrono::NaiveDateTime;
-    use serde::{self, Deserialize, Deserializer};
-
-    pub fn deserialize<'de, D>(deserialize: D) -> Result<Option<NaiveDateTime>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s: Option<String> = Option::deserialize(deserialize)?;
-        if let Some(s) = s {
-            Ok(Some(
-                NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S")
-                    .map_err(serde::de::Error::custom)?,
-            ))
-        } else {
-            Ok(None)
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct ConfigFile {
-    config: Config,
-}
-
-fn check_name(name: &str) -> bool {
-    for c in name.chars() {
-        if !matches!(c, 'a'..='z'|'A'..='Z'|'0'..='9'|'_'|'-'|' ') {
-            return false
-        }
-    }
-    true
-}
-
-fn main() -> Result<(), Error> {
+fn main() {
     let args: Args = argh::from_env();
-    let folder = PathBuf::from(args.folder);
+    if let Err(err) = run(args) {
+        report_error(err);
+        std::process::exit(1);
+    }
+}
 
-    let config_file = folder.join("psu.toml");
+fn run(args: Args) -> Result<(), PsuPackError> {
+    let root = PathBuf::from(&args.folder);
+    let manifest = load_manifest(&root)?;
 
-    if config_file.exists() {
-        let str = std::fs::read_to_string(&config_file)?;
-        let config = toml::from_str::<ConfigFile>(&str)
-            .expect("Failed to parse config file")
-            .config;
+    let pack = pack_project(
+        &root,
+        &manifest,
+        PackOptions {
+            timestamp_policy: args.timestamp_policy,
+            verify: args.verify,
+        },
+    )?;
 
-        let output_file = args.output.unwrap_or(format!("{}.psu", config.name));
+    let output = args
+        .output
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join(format!("{}.psu", manifest.name)));
 
-        if !check_name(&config.name) {
-            return Err(Error::NameError);
-        }
+    std::fs::write(&output, &pack.bytes).map_err(|source| PsuPackError::Io {
+        path: output.clone(),
+        source,
+    })?;
 
-        if config.include.is_some() && config.exclude.is_some() {
-            return Err(Error::IncludeExcludeError);
-        }
+    println!(
+        "{} {} ({})",
+        "Packed".green(),
+        output.display(),
+        format!("{} files", pack.files.len()).dimmed()
+    );
 
-        let mut psu = PSU::default();
+    for file in &pack.files {
+        println!("  {} {}", "•".dimmed(), file.name);
+    }
 
-        let files = if let Some(include) = config.include {
-            include
-                .iter()
-                .filter_map(|file| {
-                    if file.contains(|c| matches!(c, '\\' | '/')) {
-                        eprintln!(
-                            "{} {} {}",
-                            "File".dimmed(),
-                            file.dimmed(),
-                            "exists in subfolder, skipping".dimmed()
-                        );
-                        None
-                    } else if !folder.join(file).exists() {
-                        eprintln!(
-                            "{} {} {}",
-                            "File".dimmed(),
-                            file.dimmed(),
-                            "does not exist, skipping".dimmed()
-                        );
-                        None
-                    } else {
-                        Some(folder.join(file))
-                    }
-                })
-                .collect::<Vec<_>>()
-        } else if let Some(exclude) = config.exclude {
-            std::fs::read_dir(folder)?
-                .into_iter()
-                .flatten()
-                .filter_map(|d| {
-                    if !exclude.contains(&d.file_name().to_str().unwrap().to_string()) {
-                        Some(d.path())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-        } else {
-            // Include all
-            std::fs::read_dir(folder)?
-                .into_iter()
-                .flatten()
-                .map(|d| d.path())
-                .collect::<Vec<_>>()
-        };
-        let files = filter_files(&files);
-        add_psu_defaults(
-            &mut psu,
-            &config.name,
-            files.len(),
-            config.timestamp.unwrap_or_default(),
-        );
-        add_files_to_psu(&mut psu, &files)?;
-        std::fs::write(&output_file, PSUWriter::new(psu).to_bytes()?)?;
-        println!("Wrote {}! {}", output_file.green(), "".clear());
-    } else {
-        eprintln!("{}", "Failed to find psu.toml".red());
+    if args.verify {
+        println!("{}", "Verification completed".green());
     }
 
     Ok(())
 }
 
-fn filter_files(files: &[PathBuf]) -> Vec<PathBuf> {
-    files
-        .iter()
-        .filter_map(|f| {
-            if !f.is_file() {
-                println!(
-                    "{} {}",
-                    f.display().to_string().dimmed(),
-                    "is not a file, skipping".dimmed()
-                );
-                None
-            } else {
-                Some(f.to_owned())
+fn parse_policy(value: &str) -> Result<TimestampPolicy, String> {
+    value
+        .parse()
+        .map_err(|_| "timestamp policy must be one of: fixed, source, now".to_string())
+}
+
+fn report_error(error: PsuPackError) {
+    eprintln!("{} {}", "error:".red().bold(), error);
+    if let Some(issues) = error.issues() {
+        for issue in issues {
+            eprintln!("  {} {}", issue.field.blue().bold(), issue.message.white());
+            if let Some(help) = &issue.help {
+                eprintln!("      {} {}", "hint:".yellow(), help);
             }
-        })
-        .collect()
-}
-
-fn add_psu_defaults(psu: &mut PSU, name: &str, file_count: usize, timestamp: NaiveDateTime) {
-    psu.entries.push(PSUEntry {
-        id: DIR_ID,
-        size: file_count as u32 + 2, // +2 to include . and ..
-        created: timestamp,
-        sector: 0,
-        modified: timestamp,
-        name: name.to_owned(),
-        kind: PSUEntryKind::Directory,
-        contents: None,
-    });
-    psu.entries.push(PSUEntry {
-        id: DIR_ID,
-        size: 0,
-        created: timestamp,
-        sector: 0,
-        modified: timestamp,
-        name: ".".to_string(),
-        kind: PSUEntryKind::Directory,
-        contents: None,
-    });
-    psu.entries.push(PSUEntry {
-        id: DIR_ID,
-        size: 0,
-        created: timestamp,
-        sector: 0,
-        modified: timestamp,
-        name: "..".to_string(),
-        kind: PSUEntryKind::Directory,
-        contents: None,
-    });
-}
-
-fn add_files_to_psu(psu: &mut PSU, files: &[PathBuf]) -> Result<(), Error> {
-    for file in files {
-        let name = file.file_name().unwrap().to_str().unwrap();
-
-        let f = std::fs::read(file)?;
-        let stat = std::fs::metadata(file)?;
-
-        println!("+ {} {}", "Adding", name.green());
-
-        psu.entries.push(PSUEntry {
-            id: FILE_ID,
-            size: f.len() as u32,
-            created: convert_timestamp(stat.created()?),
-            sector: 0,
-            modified: convert_timestamp(stat.modified()?),
-            name: name.to_owned(),
-            kind: PSUEntryKind::File,
-            contents: Some(f),
-        })
-    }
-
-    Ok(())
-}
-
-fn convert_timestamp(time: SystemTime) -> NaiveDateTime {
-    let duration = time.duration_since(UNIX_EPOCH).unwrap();
-    let local = DateTime::from_timestamp(duration.as_secs() as i64, duration.subsec_nanos())
-        .unwrap()
-        .with_timezone(&Local)
-        .naive_local();
-
-    local
-}
-
-enum Error {
-    NameError,
-    IOError(std::io::Error),
-    IncludeExcludeError,
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            Error::NameError => write!(f, "Name must match [a-zA-Z0-9._-\\s]+"),
-            Error::IncludeExcludeError => write!(f, "Exclude cannot be used in include mode"),
-            Error::IOError(err) => write!(f, "{err:?}"),
         }
-    }
-}
-
-impl std::fmt::Debug for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self)
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(err: std::io::Error) -> Self {
-        Error::IOError(err)
     }
 }

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::dir_entry::DirEntry;
 use byteorder::{ReadBytesExt, LE};
 use std::cmp::min;
@@ -275,5 +277,4 @@ impl Memcard {
             }
         }
     }
-
 }

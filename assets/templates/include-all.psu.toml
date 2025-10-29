@@ -1,0 +1,5 @@
+# Include everything in the directory except for files listed in `exclude`.
+[config]
+name = "AUTO EXPORT"
+exclude = ["Thumbs.db", "desktop.ini"]
+# timestamp_policy = "source" # use file metadata for timestamps

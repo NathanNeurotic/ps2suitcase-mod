@@ -1,0 +1,4 @@
+[config]
+name = "MINIMAL SAVE"
+timestamp = "2003-02-01T12:00:00Z"
+include = ["icon.sys", "SAMPLE.DAT"]
